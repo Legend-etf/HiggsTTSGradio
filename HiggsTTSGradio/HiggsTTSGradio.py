@@ -78,12 +78,14 @@ def get_voice_list():
     files = []
 
     for ext in exts:
-        files.extend(str(p.relative_to(BASE_DIR)) for p in VOICE_DIR.glob(ext)) 
-
+        files.extend(
+            str(p.relative_to(BASE_DIR))
+            for p in VOICE_DIR.glob(ext)
+        )
     if not files:
         return []
 
-    return files
+    return sorted(files)
 
 def append_token(current_text, token):
     current_text = current_text or ""
@@ -94,6 +96,7 @@ def append_token(current_text, token):
     return current_text + " " + token
 
 def synthesize(text, voice_path, voice_transcript, seed):
+    voice_path = BASE_DIR / voice_path
     if seed == -1:
         seed = torch.randint(0, 10000, (1,)).item()
 
