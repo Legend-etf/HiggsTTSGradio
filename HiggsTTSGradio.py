@@ -199,8 +199,6 @@ with gr.Blocks(
                 """
             )       
 
-   
-
     generate_button = gr.Button(
         "Generate",
         variant="primary",
