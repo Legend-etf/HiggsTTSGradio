@@ -93,13 +93,17 @@ def append_token(current_text, token):
 
     return current_text + " " + token
 
-def synthesize(text, voice_path):
+def synthesize(text, voice_path, voice_transcript):
     if not text.strip():
         raise gr.Error("Please enter text.")
 
     if not voice_path:
         raise gr.Error("Please select a reference voice.")
-
+    
+    if not voice_transcript.strip():
+        voice_transcript = None
+        print("No reference transcript provided.")
+        
     ref, sr = torchaudio.load(voice_path)
 
     with torch.no_grad():
@@ -107,6 +111,7 @@ def synthesize(text, voice_path):
             text,
             tokenizer,
             reference_audio=ref,
+            reference_text=voice_transcript,
             reference_sample_rate=sr,
             max_new_tokens=2024,
             temperature=1.0
@@ -127,21 +132,9 @@ with gr.Blocks(
     head="""
     <script>
     window.insertControlToken = function(token) {
-
-        const labels = Array.from(document.querySelectorAll("label"));
-
-        const label = labels.find(
-            l => l.textContent.trim() === "Text"
+        const textarea = document.querySelector(
+            "#synth_textbox textarea"
         );
-
-        if (!label) {
-            console.log("Label not found");
-            return;
-        }
-
-        const textarea =
-            label.closest(".wrap")?.querySelector("textarea") ||
-            label.parentElement?.querySelector("textarea");
 
         if (!textarea) {
             console.log("Textarea not found");
@@ -177,14 +170,23 @@ with gr.Blocks(
             label="Reference Voice",
             value=get_voice_list()[0] if get_voice_list() else None,
         )
+        
+        voice_transcript = gr.Textbox(
+            label="Reference Transcript",
+            placeholder="Optional: Enter transcript of the reference voice for better results...",
+            elem_id="voice_transcript",
+        )
 
         refresh_button = gr.Button("🔄 Refresh Voices")
 
     text_input = gr.Textbox(
         label="Text",
         lines=8,
+        elem_id="synth_textbox",
         placeholder="Enter text to synthesize...",
     )
+    
+    gr.Markdown("## Control Tokens:")
 
     with gr.Row():
         for token in CONTROL_TOKENS:
@@ -197,7 +199,7 @@ with gr.Blocks(
                 """
             )       
 
-    gr.Markdown("## Control Tokens")
+   
 
     generate_button = gr.Button(
         "Generate",
@@ -220,6 +222,7 @@ with gr.Blocks(
         inputs=[
             text_input,
             voice_dropdown,
+            voice_transcript,
         ],
         outputs=output_audio,
     )
