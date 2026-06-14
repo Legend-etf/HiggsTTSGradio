@@ -1,5 +1,3 @@
-import os
-import glob
 import gradio as gr
 import torch
 import soundfile as sf
@@ -7,11 +5,13 @@ import torchaudio
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from pathlib import Path
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 BASE_DIR = Path(__file__).resolve().parent
 VOICE_DIR = BASE_DIR / "voices"
 MODEL_PATH = "multimodalart/higgs-audio-v3-tts-4b-transformers" #https://huggingface.co/multimodalart/higgs-audio-v3-tts-4b-transformers
 OUTPUT_FILE = "output.wav"
-
+TEXT_INPUTS = []
 CONTROL_TOKENS = [
 
     "<|emotion:elation|>",
@@ -69,8 +69,8 @@ print("Loading model...")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
     trust_remote_code=True,
-    torch_dtype=torch.float16,
-    device_map="auto"
+    dtype=torch.bfloat16,
+    device_map="cuda:0"
 ).eval()
 
 def get_voice_list():
@@ -87,6 +87,17 @@ def get_voice_list():
 
     return sorted(files)
 
+def load_transcript(voice_path):
+    if not voice_path:
+        return ""
+
+    voice_path = BASE_DIR / voice_path
+
+    txt_path = voice_path.with_suffix(".txt")
+
+    if txt_path.exists():
+        return txt_path.read_text(encoding="utf-8")
+    
 def append_token(current_text, token):
     current_text = current_text or ""
 
@@ -95,15 +106,23 @@ def append_token(current_text, token):
 
     return current_text + " " + token
 
-def synthesize(text, voice_path, voice_transcript, seed):
+def synthesize(*args):
+    *texts, voice_path, voice_transcript, seed = args
+
+    pieces = []
     voice_path = BASE_DIR / voice_path
+    ref, sr = torchaudio.load(voice_path)
+    codes = model._encode_reference(ref, sr)
+    texts = [t 
+            for t in texts
+                if t.strip()
+            ]
+
     if seed == -1:
         seed = torch.randint(0, 10000, (1,)).item()
 
-    torch.manual_seed(seed)
-
-    if not text.strip():
-        raise gr.Error("Please enter text.")
+    if not texts[0].strip():
+        raise gr.Error("Please enter text for the first input.")
 
     if not voice_path:
         raise gr.Error("Please select a reference voice.")
@@ -112,51 +131,57 @@ def synthesize(text, voice_path, voice_transcript, seed):
         voice_transcript = None
         print("No reference transcript provided.")
         
-    ref, sr = torchaudio.load(voice_path)
-    with torch.no_grad():
-        wav = model.generate_speech(
-            text,
-            tokenizer,
-            reference_audio=ref,
-            reference_text=voice_transcript,
-            reference_sample_rate=sr,
-            max_new_tokens=2024,
-            temperature=1.0
-        )
+    for text in texts:
+        torch.manual_seed(seed)
+        with torch.inference_mode():
+            wav = model.generate_speech(
+                text,
+                tokenizer,
+                reference_codes=codes,
+                reference_text=voice_transcript,
+                reference_sample_rate=sr,
+                max_new_tokens=1024,
+                temperature=1.0
+            )
+        pieces.append(wav)
+    final = torch.cat(pieces)
 
-    if torch.is_tensor(wav):
-        wav = wav.detach().cpu().numpy()
+    if torch.is_tensor(final):
+        final = final.detach().cpu().numpy()
 
     sf.write(
         OUTPUT_FILE,
-        wav,
+        final,
         model.config.sample_rate,
     )
-
     return OUTPUT_FILE
 
 with gr.Blocks(
     head="""
     <script>
-    window.insertControlToken = function(token) {
-        const textarea = document.querySelector(
-            "#synth_textbox textarea"
-        );
+    window.activeTextbox = null;
 
-        if (!textarea) {
-            console.log("Textarea not found");
+    document.addEventListener("focusin", (event) => {
+        if (event.target.tagName.toUpperCase() === "TEXTAREA") {
+            window.activeTextbox = event.target;
+        }
+    });
+
+    window.insertControlToken = function(token) {
+
+        const textarea = window.activeTextbox;
+
+        if (!textarea || !document.contains(textarea)) {
+            console.log("No active textbox");
             return;
         }
 
         textarea.focus();
 
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-
         textarea.setRangeText(
             token,
-            start,
-            end,
+            textarea.selectionStart,
+            textarea.selectionEnd,
             "end"
         );
 
@@ -177,11 +202,17 @@ with gr.Blocks(
             label="Reference Voice",
             value=get_voice_list()[0] if get_voice_list() else None,
         )
-        
+
         voice_transcript = gr.Textbox(
             label="Reference Transcript",
             placeholder="Optional: Enter transcript of the reference voice for better results...",
             elem_id="voice_transcript",
+        )
+
+        voice_dropdown.change(
+            fn=load_transcript,
+            inputs=voice_dropdown,
+            outputs=voice_transcript,
         )
 
         refresh_button = gr.Button("🔄 Refresh Voices")
@@ -195,12 +226,14 @@ with gr.Blocks(
             step=1
         )
 
-    text_input = gr.Textbox(
-        label="Text",
-        lines=8,
-        elem_id="synth_textbox",
-        placeholder="Enter text to synthesize...",
-    )
+    for i in range(6):
+        text_input = gr.Textbox(
+            label=f"Text {i+1}",
+            lines=2,
+            elem_id=f"synth_textbox_{i}",
+            placeholder="Enter text to synthesize...",
+        )
+        TEXT_INPUTS.append(text_input)
 
     gr.Markdown("## Control Tokens:")
 
@@ -239,7 +272,7 @@ with gr.Blocks(
     generate_event = generate_button.click(
         fn=synthesize,
         inputs=[
-            text_input,
+            *TEXT_INPUTS,
             voice_dropdown,
             voice_transcript,
             seed
